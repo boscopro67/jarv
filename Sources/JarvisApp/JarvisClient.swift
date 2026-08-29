@@ -25,6 +25,9 @@ final class JarvisClient: ObservableObject {
     @Published var jarvisActive: Bool = false
 
     private var authToken: String?
+    /// Exposé (lecture seule pour l'app) pour que AudioStreamer puisse ouvrir
+    /// le WebSocket /ws/phone-audio avec le même token que le reste de l'appli.
+    var currentToken: String? { authToken }
     private var deviceToken: String? {
         didSet { UserDefaults.standard.set(deviceToken, forKey: "jarvis_device_token") }
     }

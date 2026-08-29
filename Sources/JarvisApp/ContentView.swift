@@ -92,6 +92,7 @@ private struct LoginScreen: View {
 // ── Fil de discussion + barre de commande ───────────────────────────────
 private struct ChatScreen: View {
     @EnvironmentObject var client: JarvisClient
+    @StateObject private var audio = AudioStreamer()
     @State private var input: String = ""
 
     var body: some View {
@@ -105,6 +106,7 @@ private struct ChatScreen: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(dimTxt)
                 Button {
+                    audio.stop()
                     client.disconnect()
                 } label: {
                     Image(systemName: "power").foregroundColor(dimTxt)
@@ -112,6 +114,11 @@ private struct ChatScreen: View {
             }
             .padding(14)
             .background(panel)
+
+            // L'orbe — pulse doucement au repos, s'accélère en écoute,
+            // ondule plus intensément quand JARVIS parle.
+            OrbView(state: audio.voiceState)
+                .padding(.top, 18)
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -141,6 +148,15 @@ private struct ChatScreen: View {
                     Image(systemName: "sun.max.fill").foregroundColor(cyan)
                 }
 
+                // Bouton micro — active/désactive le chat vocal en direct.
+                // C'est lui qui allume l'orbe (voiceState passe à .listening).
+                Button {
+                    toggleMic()
+                } label: {
+                    Image(systemName: audio.isActive ? "mic.fill" : "mic")
+                        .foregroundColor(audio.isActive ? cyan : dimTxt)
+                }
+
                 Button {
                     guard !input.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     client.sendCommand(input)
@@ -151,6 +167,15 @@ private struct ChatScreen: View {
             }
             .padding(12)
             .background(panel)
+        }
+        .onDisappear { audio.stop() }
+    }
+
+    private func toggleMic() {
+        if audio.isActive {
+            audio.stop()
+        } else if let token = client.currentToken {
+            audio.start(serverIP: client.serverIP, token: token)
         }
     }
 }
