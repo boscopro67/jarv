@@ -1,0 +1,40 @@
+name: Build JARVIS iOS app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer XcodeGen
+        run: brew install xcodegen
+
+      - name: Générer le projet Xcode
+        run: xcodegen generate
+
+      - name: Compiler (sans signature — Sideloadly signera à l'installation)
+        run: |
+          xcodebuild build \
+            -project JarvisApp.xcodeproj \
+            -scheme JarvisApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Empaqueter en .ipa
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/JarvisApp.app Payload/
+          zip -r JarvisApp.ipa Payload
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JarvisApp-ipa
+          path: JarvisApp.ipa

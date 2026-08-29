@@ -1,0 +1,31 @@
+name: JarvisApp
+options:
+  bundleIdPrefix: com.jarvis.remote
+  deploymentTarget:
+    iOS: "16.0"
+
+targets:
+  JarvisApp:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/JarvisApp
+    info:
+      path: Sources/JarvisApp/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: "JARVIS a besoin d'accéder au réseau local pour se connecter au serveur qui tourne sur ton PC."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarvis.remote.app
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
