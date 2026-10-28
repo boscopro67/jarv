@@ -20,6 +20,8 @@ targets:
         NSMicrophoneUsageDescription: "JARVIS a besoin du micro pour le chat vocal en direct avec l'assistant."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        UIBackgroundModes:
+          - audio
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:
