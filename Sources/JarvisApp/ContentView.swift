@@ -1,310 +1,403 @@
 import SwiftUI
 
-private let bg     = Color(red: 0x03/255, green: 0x0a/255, blue: 0x0d/255)
-private let cyan   = Color(red: 0x35/255, green: 0xe6/255, blue: 0xf2/255)
-private let panel  = Color(red: 0x04/255, green: 0x14/255, blue: 0x1a/255)
-private let dimTxt = Color(red: 0x4f/255, green: 0x8b/255, blue: 0x93/255)
+// ══════════════════════════════════════════════════════════════════════
+//  Un seul écran : l'orbe au centre, trois boutons en bas.
+//  Mise en page 100 % adaptative (aucune largeur fixe) → rien ne déborde,
+//  aucun zoom, quel que soit l'iPhone (XR compris).
+// ══════════════════════════════════════════════════════════════════════
 
 struct ContentView: View {
     @EnvironmentObject var client: JarvisClient
+    @EnvironmentObject var voice: LiveVoiceClient
+    @EnvironmentObject var chat: ChatStore
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var showChat = false
+    @State private var showSettings = false
 
     var body: some View {
         ZStack {
-            bg.ignoresSafeArea()
-            switch client.state {
-            case .connected, .offline:
-                ChatScreen()
-            case .home:
-                HomeView()
-            case .searching, .connecting:
-                SearchingScreen()
-            case .needsPin, .error:
-                LoginScreen()
+            background
+            VStack(spacing: 0) {
+                header
+                    .padding(.top, 6)
+
+                orbStage
+                    .padding(.vertical, 8)
+
+                statusBlock
+
+                controls
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
             }
+            .padding(.horizontal, 20)
         }
-        // Plus de connexion automatique à l'ouverture : l'appli attend que
-        // tu tapes le bloc JARVIS sur l'écran d'accueil.
+        // Le texte ne grossit jamais au point de déborder.
+        .dynamicTypeSize(.xSmall ... .large)
+        .sheet(isPresented: $showChat) {
+            ChatSheet().environmentObject(chat).environmentObject(client)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsSheet().environmentObject(client).environmentObject(chat)
+        }
+        .onAppear {
+            voice.onTranscript = { speaker, text in chat.record(speaker: speaker, text: text) }
+            client.startMonitoring()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { client.recheckNow() }
+        }
     }
-}
 
-// ── Écran d'accueil — le bloc "JARVIS" qui donne accès au PC ───────────
-private struct HomeView: View {
-    @EnvironmentObject var client: JarvisClient
+    // ── Fond : noir profond avec une lueur douce derrière l'orbe ────────
+    private var background: some View {
+        ZStack {
+            Theme.bg
+            RadialGradient(colors: [Theme.bgGlow, Theme.bg],
+                           center: .center, startRadius: 0, endRadius: 520)
+                .opacity(voice.state == .idle ? 0.55 : 0.95)
+                .animation(.easeInOut(duration: 0.8), value: voice.state)
+        }
+        .ignoresSafeArea()
+    }
 
-    var body: some View {
-        VStack(spacing: 26) {
-            Spacer()
+    // ── En-tête ───────────────────────────────────────────────────────────
+    private var header: some View {
+        HStack {
             Text("J A R V I S")
-                .font(.system(size: 15, weight: .bold, design: .monospaced))
-                .foregroundColor(dimTxt)
-                .tracking(3)
-
-            Button {
-                client.start()
-            } label: {
-                VStack(spacing: 16) {
-                    OrbView(state: .idle)
-                    Text("JARVIS")
-                        .font(.system(size: 18, weight: .bold, design: .monospaced))
-                        .foregroundColor(cyan)
-                    Text("Accéder au PC")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(dimTxt)
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundColor(Theme.cyan)
+                .lineLimit(1)
+            Spacer()
+            Button { showSettings = true } label: {
+                HStack(spacing: 6) {
+                    Circle().fill(pcColor).frame(width: 7, height: 7)
+                    Text(pcLabel)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(Theme.dim)
+                        .lineLimit(1)
                 }
-                .frame(width: 210, height: 210)
-                .background(panel)
-                .overlay(RoundedRectangle(cornerRadius: 22).stroke(cyan.opacity(0.35)))
-                .cornerRadius(22)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .overlay(Capsule().stroke(Theme.dim.opacity(0.35), lineWidth: 1))
             }
             .buttonStyle(.plain)
-
-            Spacer()
-            Spacer()
         }
     }
-}
 
-// ── Écran affiché pendant la découverte automatique — aucune saisie ────
-private struct SearchingScreen: View {
-    var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            ProgressView().tint(cyan).scaleEffect(1.3)
-            Text("Connexion à JARVIS…")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundColor(dimTxt)
-            Spacer()
+    private var pcColor: Color {
+        switch client.pcStatus {
+        case .online:        return Theme.cyan
+        case .checking:      return Theme.warn
+        case .offline:       return Theme.dim
+        case .notConfigured: return Theme.dim.opacity(0.5)
         }
     }
-}
 
-// ── Écran de connexion (SECOURS uniquement, si la découverte auto échoue) ──
-private struct LoginScreen: View {
-    @EnvironmentObject var client: JarvisClient
-    @State private var pin: String = ""
+    private var pcLabel: String {
+        switch client.pcStatus {
+        case .online:        return "PC LIÉ"
+        case .checking:      return "PC…"
+        case .offline:       return "PC HORS LIGNE"
+        case .notConfigured: return "PC NON LIÉ"
+        }
+    }
 
-    var body: some View {
-        VStack(spacing: 22) {
-            Spacer()
-            Text("J A R V I S")
-                .font(.system(size: 22, weight: .bold, design: .monospaced))
-                .foregroundColor(cyan)
-                .tracking(4)
-
-            Text("Indique l'adresse du PC (celle de Tailscale, 100.x.x.x).\nElle est gardée : tu ne la saisis qu'une fois.")
-                .font(.system(size: 11))
-                .foregroundColor(dimTxt)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("ADRESSE DU PC (Tailscale)").font(.caption).foregroundColor(dimTxt)
-                TextField("100.x.x.x", text: $client.remoteHost)
-                    .keyboardType(.numbersAndPunctuation)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .padding(12)
-                    .background(panel)
-                    .cornerRadius(8)
-                    .foregroundColor(.white)
+    // ── L'orbe (toucher pour démarrer) ────────────────────────────────────
+    private var orbStage: some View {
+        OrbView(state: voice.state, level: voice.level, muted: voice.muted)
+            .frame(maxWidth: 340, maxHeight: 340)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if voice.state == .idle { voice.start() }
             }
-            .padding(.horizontal, 32)
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("CODE (facultatif — Remote Control sur JARVIS)").font(.caption).foregroundColor(dimTxt)
-                TextField("AB12CD", text: $pin)
-                    .autocapitalization(.allCharacters)
-                    .disableAutocorrection(true)
-                    .padding(12)
-                    .background(panel)
-                    .cornerRadius(8)
-                    .foregroundColor(.white)
-                    .onChange(of: pin) { pin = String($0.uppercased().prefix(6)) }
-            }
-            .padding(.horizontal, 32)
+    // ── Texte d'état + dernière phrase ────────────────────────────────────
+    private var statusBlock: some View {
+        VStack(spacing: 10) {
+            Text(statusText)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .tracking(2)
+                .foregroundColor(Theme.cyan.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
 
-            if case .error(let msg) = client.state {
-                Text(msg).font(.caption).foregroundColor(.red).padding(.horizontal, 32)
-            }
-            if client.state == .connecting {
-                ProgressView().tint(cyan)
-            }
-
-            Button {
-                if pin.count == 6 {
-                    client.login(pin: pin)
+            Group {
+                if let error = voice.errorText {
+                    Text(error).foregroundColor(Theme.warn)
+                } else if !voice.caption.isEmpty {
+                    Text(voice.caption)
+                        .foregroundColor(voice.captionIsUser ? Theme.dim : .white)
                 } else {
-                    client.start()
+                    Text(" ")
                 }
-            } label: {
-                Text("SE CONNECTER")
-                    .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .frame(maxWidth: .infinity)
-                    .padding(14)
-                    .background(cyan.opacity(0.12))
-                    .foregroundColor(cyan)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(cyan.opacity(0.5)))
-                    .cornerRadius(8)
             }
-            .padding(.horizontal, 32)
-            .disabled(client.remoteHost.trimmingCharacters(in: .whitespaces).isEmpty)
-
-            Button {
-                client.retryAutomatically()
-            } label: {
-                Text("Réessayer la découverte automatique")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(dimTxt)
-            }
-
-            Button {
-                client.enterOffline()
-            } label: {
-                Text("Continuer en mode autonome (sans le PC)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(cyan)
-            }
-
-            Spacer()
-            Spacer()
+            .font(.system(size: 15))
+            .multilineTextAlignment(.center)
+            .lineLimit(4)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity, minHeight: 80, alignment: .top)
         }
+    }
+
+    private var statusText: String {
+        switch voice.state {
+        case .idle:       return "TOUCHE L'ORBE POUR PARLER"
+        case .connecting: return "CONNEXION…"
+        case .listening:  return voice.muted ? "MICRO COUPÉ" : "JE T'ÉCOUTE"
+        case .speaking:   return "JARVIS PARLE"
+        }
+    }
+
+    // ── Boutons ──────────────────────────────────────────────────────────
+    private var controls: some View {
+        HStack(spacing: 0) {
+            roundButton(icon: voice.muted ? "mic.slash.fill" : "mic.fill",
+                        active: voice.isActive && !voice.muted,
+                        enabled: voice.isActive) {
+                voice.toggleMute()
+            }
+            Spacer()
+            roundButton(icon: voice.isActive ? "power" : "waveform",
+                        active: voice.isActive, enabled: true, large: true) {
+                if voice.isActive { voice.stop() } else { voice.start() }
+            }
+            Spacer()
+            roundButton(icon: "text.bubble", active: false, enabled: true) {
+                showChat = true
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    private func roundButton(icon: String, active: Bool, enabled: Bool,
+                             large: Bool = false, action: @escaping () -> Void) -> some View {
+        let size: CGFloat = large ? 68 : 54
+        return Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: large ? 24 : 19, weight: .light))
+                .foregroundColor(active ? Theme.cyan : Theme.dim)
+                .frame(width: size, height: size)
+                .background(Circle().fill(Theme.panel.opacity(0.6)))
+                .overlay(Circle().stroke(active ? Theme.cyan.opacity(0.7) : Theme.dim.opacity(0.35),
+                                         lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .opacity(enabled ? 1 : 0.35)
+        .disabled(!enabled)
     }
 }
 
-// ── Fil de discussion + barre de commande ───────────────────────────────
-private struct ChatScreen: View {
-    @EnvironmentObject var client: JarvisClient
-    @StateObject private var audio = AudioStreamer()
-    @State private var input: String = ""
+// ══════════════════════════════════════════════════════════════════════
+//  Historique + saisie au clavier
+// ══════════════════════════════════════════════════════════════════════
+private struct ChatSheet: View {
+    @EnvironmentObject var chat: ChatStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("JARVIS").font(.system(size: 15, weight: .bold, design: .monospaced))
-                    .foregroundColor(cyan)
-                Spacer()
-                if client.state == .offline {
-                    Text("MODE AUTONOME")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(.orange)
-                    Button {
-                        client.start()
-                    } label: {
-                        Image(systemName: "arrow.clockwise").foregroundColor(dimTxt)
-                    }
-                    Button {
-                        client.openSettings()
-                    } label: {
-                        Image(systemName: "gearshape").foregroundColor(dimTxt)
-                    }
-                } else {
-                    Circle().fill(client.jarvisActive ? .green : dimTxt).frame(width: 8, height: 8)
-                    Text(client.jarvisActive ? "ACTIVE" : "SLEEPING")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(dimTxt)
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack {
+                    Text("HISTORIQUE")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .tracking(2)
+                        .foregroundColor(Theme.cyan)
+                    Spacer()
+                    Button("Fermer") { dismiss() }
+                        .font(.system(size: 14))
+                        .foregroundColor(Theme.dim)
                 }
-                Button {
-                    audio.stop()
-                    client.disconnect()
-                } label: {
-                    Image(systemName: "power").foregroundColor(dimTxt)
-                }
-            }
-            .padding(14)
-            .background(panel)
+                .padding(16)
 
-            // L'orbe — pulse doucement au repos, s'accélère en écoute,
-            // ondule plus intensément quand JARVIS parle.
-            OrbView(state: audio.voiceState)
-                .padding(.top, 18)
-
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(client.messages) { m in
-                            MessageBubble(message: m)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(chat.messages) { message in
+                                Bubble(message: message)
+                            }
+                            if chat.isThinking {
+                                ProgressView().tint(Theme.cyan)
+                            }
+                            Color.clear.frame(height: 1).id("bottom")
                         }
-                        if client.isThinking {
-                            ProgressView().tint(cyan)
-                        }
+                        .padding(.horizontal, 16)
                     }
-                    .padding(14)
-                    .id("bottom")
+                    .onChange(of: chat.messages) { _ in
+                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                    }
+                    .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
-                .onChange(of: client.messages) { _ in
-                    withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+
+                HStack(spacing: 10) {
+                    TextField("Écris à Jarvis…", text: $input)
+                        .font(.system(size: 16))
+                        .padding(12)
+                        .background(Theme.panel)
+                        .cornerRadius(12)
+                        .foregroundColor(.white)
+                        .submitLabel(.send)
+                        .onSubmit(send)
+                    Button(action: send) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(Theme.cyan)
+                    }
                 }
+                .padding(12)
             }
-
-            HStack(spacing: 8) {
-                TextField(client.state == .offline ? "Écris à Jarvis…" : "Écris une commande…", text: $input)
-                    .padding(10)
-                    .background(panel)
-                    .cornerRadius(8)
-                    .foregroundColor(.white)
-
-                // Réveil et micro passent par le PC : masqués en mode autonome.
-                if client.state != .offline {
-                    Button {
-                        client.wake()
-                    } label: {
-                        Image(systemName: "sun.max.fill").foregroundColor(cyan)
-                    }
-
-                    // Bouton micro — active/désactive le chat vocal en direct.
-                    // C'est lui qui allume l'orbe (voiceState passe à .listening).
-                    Button {
-                        toggleMic()
-                    } label: {
-                        Image(systemName: audio.isActive ? "mic.fill" : "mic")
-                            .foregroundColor(audio.isActive ? cyan : dimTxt)
-                    }
-                }
-
-                Button {
-                    guard !input.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                    client.sendCommand(input)
-                    input = ""
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill").foregroundColor(cyan)
-                }
-            }
-            .padding(12)
-            .background(panel)
         }
-        .onDisappear { audio.stop() }
+        .dynamicTypeSize(.xSmall ... .large)
     }
 
-    private func toggleMic() {
-        if audio.isActive {
-            audio.stop()
-        } else if let token = client.currentToken {
-            audio.start(serverIP: client.serverIP, token: token)
-        }
+    private func send() {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        input = ""
+        chat.send(text)
     }
 }
 
-private struct MessageBubble: View {
+private struct Bubble: View {
     let message: ChatMessage
 
     var body: some View {
         HStack {
             if message.speaker == "user" { Spacer(minLength: 40) }
             Text(message.text)
-                .font(.system(size: 14))
-                .foregroundColor(.white)
+                .font(.system(size: 15))
+                .foregroundColor(message.speaker == "sys" ? Theme.warn : .white)
                 .padding(10)
-                .background(bubbleColor)
-                .cornerRadius(12)
+                .background(background)
+                .cornerRadius(14)
+                .fixedSize(horizontal: false, vertical: true)
             if message.speaker != "user" { Spacer(minLength: 40) }
         }
     }
 
-    private var bubbleColor: Color {
+    private var background: Color {
         switch message.speaker {
-        case "user": return cyan.opacity(0.18)
+        case "user": return Theme.cyan.opacity(0.16)
         case "sys":  return .clear
-        default:     return panel
+        default:     return Theme.panel
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Réglages : adresse du PC (une seule fois) et clé Gemini en secours
+// ══════════════════════════════════════════════════════════════════════
+private struct SettingsSheet: View {
+    @EnvironmentObject var client: JarvisClient
+    @EnvironmentObject var chat: ChatStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var manualKey = ""
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        Text("RÉGLAGES")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .tracking(2)
+                            .foregroundColor(Theme.cyan)
+                        Spacer()
+                        Button("Fermer") { dismiss() }
+                            .font(.system(size: 14))
+                            .foregroundColor(Theme.dim)
+                    }
+
+                    section("ADRESSE DU PC (TAILSCALE)") {
+                        TextField("100.x.x.x", text: $client.remoteHost)
+                            .keyboardType(.numbersAndPunctuation)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .field()
+                        Button {
+                            client.recheckNow()
+                        } label: {
+                            Text("VÉRIFIER LA LIAISON")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .foregroundColor(Theme.cyan)
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.cyan.opacity(0.5)))
+                        }
+                        if !client.detail.isEmpty {
+                            Text(client.detail)
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.dim)
+                        }
+                        Text("À saisir une seule fois. Le PC doit être allumé, Jarvis lancé, Tailscale actif sur le PC et sur le téléphone. Ensuite, le téléphone fonctionne aussi sans le PC.")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.dim.opacity(0.85))
+                    }
+
+                    section("CLÉ GEMINI") {
+                        Text(client.hasKey ? "Présente sur ce téléphone." : "Absente : lie le PC, ou colle-la ici.")
+                            .font(.system(size: 12))
+                            .foregroundColor(client.hasKey ? Theme.cyan : Theme.warn)
+                        SecureField("Coller une clé (facultatif)", text: $manualKey)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .field()
+                        Button {
+                            client.saveKey(manualKey)
+                            manualKey = ""
+                        } label: {
+                            Text("ENREGISTRER LA CLÉ")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .foregroundColor(Theme.dim)
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.dim.opacity(0.4)))
+                        }
+                        .disabled(manualKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+
+                    section("HISTORIQUE") {
+                        Button {
+                            chat.clear()
+                        } label: {
+                            Text("EFFACER L'HISTORIQUE DU TÉLÉPHONE")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .frame(maxWidth: .infinity)
+                                .padding(12)
+                                .foregroundColor(Theme.warn)
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.warn.opacity(0.4)))
+                        }
+                    }
+                }
+                .padding(20)
+            }
+        }
+        .dynamicTypeSize(.xSmall ... .large)
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .tracking(1.5)
+                .foregroundColor(Theme.dim)
+            content()
+        }
+    }
+}
+
+private extension View {
+    func field() -> some View {
+        self.font(.system(size: 16))
+            .padding(12)
+            .background(Theme.panel)
+            .cornerRadius(10)
+            .foregroundColor(.white)
     }
 }
