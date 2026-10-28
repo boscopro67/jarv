@@ -1,0 +1,5 @@
+JarvisApp.xcodeproj/
+build/
+Payload/
+JarvisApp.ipa
+.DS_Store

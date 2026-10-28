@@ -14,7 +14,9 @@ targets:
       path: Sources/JarvisApp/Info.plist
       properties:
         UILaunchScreen: {}
-        NSLocalNetworkUsageDescription: "JARVIS a besoin d'accéder au réseau local pour se connecter au serveur qui tourne sur ton PC."
+        NSLocalNetworkUsageDescription: "JARVIS a besoin d'accéder au réseau local pour trouver et se connecter automatiquement au PC."
+        NSBonjourServices:
+          - "_jarvis._tcp"
         NSMicrophoneUsageDescription: "JARVIS a besoin du micro pour le chat vocal en direct avec l'assistant."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
