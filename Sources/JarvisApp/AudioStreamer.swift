@@ -21,12 +21,15 @@ final class AudioStreamer: NSObject, ObservableObject {
                                             sampleRate: 16000, channels: 1,
                                             interleaved: true)!
 
-    // Lecture de la voix de JARVIS → 24 kHz mono 16-bit PCM
+    // Lecture de la voix de JARVIS → reçue en 24 kHz mono 16-bit PCM, mais
+    // AVAudioEngine n'accepte QUE du Float32 pour connecter ses nœuds entre
+    // eux (Int16 y fait planter l'appli immédiatement) — on convertit donc
+    // chaque paquet reçu en Float32 juste avant de le jouer.
     private let playerEngine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
-    private let playFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
+    private let playFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                             sampleRate: 24000, channels: 1,
-                                            interleaved: true)!
+                                            interleaved: false)!
 
     var isActive: Bool { wsTask != nil }
 
@@ -39,16 +42,26 @@ final class AudioStreamer: NSObject, ObservableObject {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
         try? session.setActive(true)
-        session.requestRecordPermission { _ in }
 
-        let task = URLSession.shared.webSocketTask(with: url)
-        wsTask = task
-        task.resume()
-
-        setupPlayback()
-        listenForIncomingAudio()
-        startCapturing()
-        voiceState = .listening
+        // On attend la permission micro AVANT de toucher au moteur audio —
+        // installer un tap ou démarrer l'engine sans permission accordée
+        // est une des causes classiques de crash.
+        session.requestRecordPermission { [weak self] granted in
+            Task { @MainActor in
+                guard let self else { return }
+                guard granted else {
+                    self.voiceState = .idle
+                    return
+                }
+                let task = URLSession.shared.webSocketTask(with: url)
+                self.wsTask = task
+                task.resume()
+                self.setupPlayback()
+                self.listenForIncomingAudio()
+                self.startCapturing()
+                self.voiceState = .listening
+            }
+        }
     }
 
     func stop() {
@@ -121,17 +134,22 @@ final class AudioStreamer: NSObject, ObservableObject {
     }
 
     private func playChunk(_ data: Data) {
-        let frameCount = data.count / MemoryLayout<Int16>.size
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(frameCount))
+        // Le serveur envoie du 16-bit PCM (Int16) — on le convertit en
+        // Float32 normalisé [-1, 1], seul format que le moteur accepte.
+        let sampleCount = data.count / MemoryLayout<Int16>.size
+        guard sampleCount > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(sampleCount))
         else { return }
-        buffer.frameLength = AVAudioFrameCount(frameCount)
+        buffer.frameLength = AVAudioFrameCount(sampleCount)
+
         data.withUnsafeBytes { raw in
-            if let src = raw.bindMemory(to: Int16.self).baseAddress,
-               let dst = buffer.int16ChannelData?[0] {
-                dst.update(from: src, count: frameCount)
+            guard let src = raw.bindMemory(to: Int16.self).baseAddress,
+                  let dst = buffer.floatChannelData?[0] else { return }
+            for i in 0..<sampleCount {
+                dst[i] = Float(src[i]) / 32768.0
             }
         }
+
         pendingBuffers += 1
         voiceState = .speaking
         playerNode.scheduleBuffer(buffer) { [weak self] in
