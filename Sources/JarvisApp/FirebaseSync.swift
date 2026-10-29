@@ -188,22 +188,49 @@ actor FirebaseSync {
         await flush()
     }
 
-    /// Envoie les échanges en attente. Sans effet s'il n'y en a pas.
+    /// Mémorise un fait durable (nom, préférence, projet…), comme le fait le PC.
+    func saveFact(category: String, key: String, value: String) async {
+        let valid = ["identity", "preferences", "projects", "relationships", "wishes", "notes"]
+        let cat = valid.contains(category) ? category : "notes"
+        let cleanKey = String(key.map { ".$#[]/".contains($0) ? "_" : $0 })
+        guard !cleanKey.isEmpty, !value.isEmpty else { return }
+        var list = loadPending()
+        list.append(["kind": "fact", "category": cat, "key": cleanKey,
+                     "value": String(value.prefix(380))])
+        savePending(list)
+        await flush()
+    }
+
+    /// Envoie ce qui est en attente (échanges et faits). Sans effet s'il n'y a rien.
     func flush() async {
         if flushing { return }
         flushing = true
         defer { flushing = false }
 
         while let item = loadPending().first {
-            let payload: [String: Any] = [
-                "speaker": item["speaker"] as? String ?? "user",
-                "text": item["text"] as? String ?? "",
-                "device": "iphone",
-                "ts": item["ts"] as? Double ?? Date().timeIntervalSince1970 * 1000
-            ]
             do {
-                let body = try JSONSerialization.data(withJSONObject: payload)
-                let (status, data) = try await database("memory/messages", method: "POST", body: body)
+                let result: (Int, Data)
+                if (item["kind"] as? String) == "fact" {
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale(identifier: "en_US_POSIX")
+                    formatter.dateFormat = "yyyy-MM-dd"
+                    let body = try JSONSerialization.data(withJSONObject: [
+                        "value": item["value"] as? String ?? "",
+                        "updated": formatter.string(from: Date()),
+                        "source": "iphone"
+                    ])
+                    let path = "memory/facts/\(item["category"] as? String ?? "notes")/\(item["key"] as? String ?? "note")"
+                    result = try await database(path, method: "PUT", body: body)
+                } else {
+                    let body = try JSONSerialization.data(withJSONObject: [
+                        "speaker": item["speaker"] as? String ?? "user",
+                        "text": item["text"] as? String ?? "",
+                        "device": "iphone",
+                        "ts": item["ts"] as? Double ?? Date().timeIntervalSince1970 * 1000
+                    ])
+                    result = try await database("memory/messages", method: "POST", body: body)
+                }
+                let (status, data) = result
                 guard status == 200 else {
                     explain(status: status, data: data)
                     return
@@ -216,7 +243,7 @@ actor FirebaseSync {
                 lastStatus = "Identité Firebase impossible : \(text)"
                 return
             } catch {
-                lastStatus = "Hors ligne : les échanges sont gardés et partiront avec le réseau."
+                lastStatus = "Hors ligne : tout est gardé et partira avec le réseau."
                 return
             }
         }
@@ -264,9 +291,12 @@ actor FirebaseSync {
                 guard let items = dict[category] as? [String: Any] else { continue }
                 for key in items.keys.sorted() {
                     var value: String?
-                    if let entry = items[key] as? [String: Any] { value = entry["value"] as? String }
-                    else { value = items[key] as? String }
-                    if let value = value, !value.isEmpty { lines.append("- \(category)/\(key) : \(value)") }
+                    var source = ""
+                    if let entry = items[key] as? [String: Any] {
+                        value = entry["value"] as? String
+                        if let src = entry["source"] as? String { source = src == "iphone" ? " [iPhone]" : " [PC]" }
+                    } else { value = items[key] as? String }
+                    if let value = value, !value.isEmpty { lines.append("- \(category)/\(key) : \(value)\(source)") }
                 }
             }
             return String(lines.joined(separator: "\n").prefix(1500))
@@ -275,15 +305,21 @@ actor FirebaseSync {
         }
     }
 
+    private func relative(_ ms: Double) -> String {
+        guard ms > 0 else { return "date inconnue" }
+        let seconds = max(0, Date().timeIntervalSince1970 - ms / 1000)
+        if seconds < 90 { return "à l'instant" }
+        if seconds < 3600 { return "il y a \(Int(seconds / 60)) min" }
+        if seconds < 86400 { return "il y a \(Int(seconds / 3600)) h" }
+        return "il y a \(Int(seconds / 86400)) j"
+    }
+
+    /// Du PLUS RÉCENT au plus ancien : la première ligne est le dernier échange.
     private func format(_ messages: [SharedMessage]) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "fr_FR")
-        formatter.dateFormat = "dd/MM HH:mm"
-        return messages.map { m -> String in
-            let when = m.ts > 0 ? formatter.string(from: Date(timeIntervalSince1970: m.ts / 1000)) : "?"
-            let device = m.device == "iphone" ? "iPhone" : "PC"
+        return messages.sorted { $0.ts > $1.ts }.map { m -> String in
+            let origin = m.device == "iphone" ? "iPhone" : "PC"
             let who = m.speaker == "user" ? "Utilisateur" : "Jarvis"
-            return "[\(when) · \(device)] \(who) : \(String(m.text.prefix(300)))"
+            return "\(relative(m.ts)) [\(origin)] — \(who) : \(String(m.text.prefix(300)))"
         }.joined(separator: "\n")
     }
 
@@ -294,16 +330,25 @@ actor FirebaseSync {
         let facts = await factsText()
         if !facts.isEmpty { parts.append("Ce que tu sais sur l'utilisateur :\n" + facts) }
         if let messages = await recent(limit: 24), !messages.isEmpty {
-            parts.append("Derniers échanges (PC et iPhone, du plus ancien au plus récent) :\n" + format(messages))
+            parts.append("Derniers échanges, DU PLUS RÉCENT AU PLUS ANCIEN (la première ligne est le tout dernier échange ; l'origine de chaque ligne est entre crochets) :\n" + format(messages))
         }
-        return parts.joined(separator: "\n\n")
+        let result = parts.joined(separator: "\n\n")
+        if !result.isEmpty {
+            defaults.set(result, forKey: "jarvis_fb_ctx_cache")
+            return result
+        }
+        // Serveur injoignable : dernière mémoire partagée connue.
+        return defaults.string(forKey: "jarvis_fb_ctx_cache") ?? ""
     }
 
     /// Réponse à l'outil recall_memory : l'historique partagé le plus frais.
     func recallText() async -> String {
         await flush()
         if let messages = await recent(limit: 40), !messages.isEmpty {
-            return "Historique partagé (du plus ancien au plus récent) :\n" + format(messages)
+            return "Historique partagé, DU PLUS RÉCENT AU PLUS ANCIEN (la première ligne est le tout dernier échange ; l'origine de chaque ligne est entre crochets) :\n" + format(messages)
+        }
+        if let cached = defaults.string(forKey: "jarvis_fb_ctx_cache"), !cached.isEmpty {
+            return "Serveur injoignable ; dernière mémoire partagée connue :\n" + cached
         }
         let local = OfflineStore.load().suffix(20)
         if local.isEmpty { return "Aucun historique pour l'instant." }

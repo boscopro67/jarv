@@ -123,6 +123,7 @@ enum GeminiClient {
         return """
         Tu es JARVIS, l'assistant personnel de l'utilisateur, dans l'esprit de Jarvis d'Iron Man : professionnel, efficace, direct, légèrement ironique. Pas de blabla.
         Réponds dans la langue de l'utilisateur. Adapte la longueur à la demande : court par défaut, détaillé seulement si la question l'exige.
+        MÉMOIRE UNIQUE : tu as une seule mémoire, partagée entre le PC et le téléphone de l'utilisateur. Ne demande jamais de quel appareil il parle. Quand il évoque le passé (« tout à l'heure », « la phrase que je t'ai demandée », « le dernier calcul »), réponds avec l'élément le PLUS RÉCENT correspondant dans la mémoire (première ligne = la plus récente) et ignore les plus anciens. Chaque ligne de mémoire porte son origine entre crochets ([PC] ou [iPhone]). Ignore cette information par défaut : tout est une seule mémoire, et tu ne mentionnes jamais l'origine de toi-même. Ne t'en sers que si l'utilisateur nomme un appareil (« sur le PC », « sur mon téléphone »), auquel cas tu ne retiens que les lignes de cet appareil, ou s'il demande d'où vient une information.
         N'utilise pas de mise en forme Markdown (pas d'astérisques ni de listes à puces) : du texte simple.
         Tu écris dans l'appli du téléphone de l'utilisateur. Tu ne peux exécuter aucune action sur son ordinateur (ouvrir une application, voir l'écran, accéder aux fichiers) : si on te le demande, dis-le en une phrase.
         Tu n'as pas accès à internet en direct : ne prétends jamais avoir vérifié une information récente, et signale quand une réponse peut être périmée.
@@ -177,8 +178,9 @@ enum GeminiClient {
             do {
                 let (data, response) = try await fetch(request)
                 guard let http = response as? HTTPURLResponse else { throw GeminiError.network("réponse invalide") }
-                if http.statusCode == 404 {
-                    lastError = GeminiError.http(404, "modèle introuvable")
+                // Modèle absent ou surchargé : on essaie le suivant.
+                if http.statusCode == 404 || [429, 500, 502, 503, 504].contains(http.statusCode) {
+                    lastError = GeminiError.http(http.statusCode, errorMessage(from: data))
                     continue
                 }
                 guard http.statusCode == 200 else {
@@ -188,27 +190,27 @@ enum GeminiClient {
             } catch let error as GeminiError {
                 throw error
             } catch let error as URLError {
-                throw GeminiError.network("\(error.code.rawValue) \(error.localizedDescription)")
+                lastError = GeminiError.network("\(error.code.rawValue) \(error.localizedDescription)")
+                continue
             } catch {
-                throw GeminiError.network(error.localizedDescription)
+                lastError = GeminiError.network(error.localizedDescription)
+                continue
             }
         }
         throw lastError
     }
 
-    /// Session dédiée : attend le réseau au lieu d'échouer, et ne réutilise pas
-    /// de connexion périmée (fréquent quand le VPN Tailscale change de route).
-    private static let session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.waitsForConnectivity = true
-        config.timeoutIntervalForResource = 90
-        return URLSession(configuration: config)
-    }()
-
-    /// Envoie la requête ; réessaie 2 fois en cas de coupure réseau passagère.
+    /// Envoie la requête sur une connexion neuve à chaque essai (une connexion
+    /// réutilisée est souvent coupée quand le VPN Tailscale change de route) ;
+    /// réessaie 2 fois en cas de coupure passagère.
     private static func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         var attempt = 0
         while true {
+            let config = URLSessionConfiguration.ephemeral
+            config.waitsForConnectivity = true
+            config.timeoutIntervalForResource = 90
+            let session = URLSession(configuration: config)
+            defer { session.finishTasksAndInvalidate() }
             do {
                 return try await session.data(for: request)
             } catch let error as URLError {

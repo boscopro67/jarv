@@ -218,6 +218,34 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         sock.sendText(setupMessage(sharedContext: sharedContext))
     }
 
+    /// Outils que JARVIS peut appeler : enregistrer un fait, relire la mémoire partagée.
+    private static func toolDeclarations() -> [[String: Any]] {
+        let saveMemory: [String: Any] = [
+            "name": "save_memory",
+            "description": "Enregistre en silence un fait durable sur l'utilisateur (prénom, âge, ville, métier, goûts, projets, proches, envies, habitudes). À appeler sans l'annoncer dès que l'utilisateur en révèle un. Pas pour les demandes ponctuelles (météo, rappels, calculs). Valeur en anglais.",
+            "parameters": [
+                "type": "OBJECT",
+                "properties": [
+                    "category": ["type": "STRING", "description": "identity | preferences | projects | relationships | wishes | notes"],
+                    "key": ["type": "STRING", "description": "Clé courte en snake_case, ex. name, favorite_food"],
+                    "value": ["type": "STRING", "description": "Valeur concise en anglais"]
+                ] as [String: Any],
+                "required": ["category", "key", "value"]
+            ] as [String: Any]
+        ]
+        let recallMemory: [String: Any] = [
+            "name": "recall_memory",
+            "description": "Relit l'historique le plus récent de toutes les conversations de l'utilisateur (PC et téléphone confondus). À appeler dès que l'utilisateur parle de quelque chose dit plus tôt, hier ou ailleurs (par exemple « le calcul que je t'ai demandé », « ce que je te disais tout à l'heure »).",
+            "parameters": [
+                "type": "OBJECT",
+                "properties": [
+                    "reason": ["type": "STRING", "description": "Ce que tu cherches à retrouver"]
+                ] as [String: Any]
+            ] as [String: Any]
+        ]
+        return [saveMemory, recallMemory]
+    }
+
     private func setupMessage(sharedContext: String) -> String {
         let setup: [String: Any] = [
             "setup": [
@@ -229,18 +257,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
                     ]
                 ],
                 "systemInstruction": ["parts": [["text": Self.systemPrompt(sharedContext: sharedContext)]]],
-                "tools": [[
-                    "functionDeclarations": [[
-                        "name": "recall_memory",
-                        "description": "Relit l'historique le plus récent des conversations partagées entre le PC et le téléphone de l'utilisateur. À appeler dès que l'utilisateur parle de quelque chose dit plus tôt, hier, ou sur l'autre appareil (par exemple « le calcul que je t'ai demandé », « ce que je te disais tout à l'heure »).",
-                        "parameters": [
-                            "type": "OBJECT",
-                            "properties": [
-                                "reason": ["type": "STRING", "description": "Ce que tu cherches à retrouver"]
-                            ]
-                        ]
-                    ]]
-                ]],
+                "tools": [["functionDeclarations": Self.toolDeclarations()]],
                 "inputAudioTranscription": [String: Any](),
                 "outputAudioTranscription": [String: Any]()
             ]
@@ -261,7 +278,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         let recent = OfflineStore.load().suffix(12)
         if !sharedContext.isEmpty {
             memory = "\n\nMémoire partagée entre le PC et le téléphone de l'utilisateur (tu t'en souviens, ne la récite pas) :\n" + sharedContext
-                + "\nSi l'utilisateur parle de quelque chose qui n'est pas dans cette mémoire (dit à l'instant, ou sur l'autre appareil), appelle l'outil recall_memory pour relire l'historique le plus récent avant de répondre."
+                + "\n\nMÉMOIRE UNIQUE : c'est une seule mémoire pour tous les appareils de l'utilisateur. Ne lui demande jamais de quel appareil il parle. Dès qu'il évoque le passé (« tout à l'heure », « la phrase que je t'ai demandée », « le dernier calcul », « hier »), appelle D'ABORD l'outil recall_memory pour relire l'historique le plus frais, puis réponds avec l'élément le PLUS RÉCENT correspondant (première ligne = la plus récente) et ignore les plus anciens. Chaque ligne de mémoire porte son origine entre crochets ([PC] ou [iPhone]). Ignore cette information par défaut : tout est une seule mémoire, et tu ne mentionnes jamais l'origine de toi-même. Ne t'en sers que si l'utilisateur nomme un appareil (« sur le PC », « sur mon téléphone »), auquel cas tu ne retiens que les lignes de cet appareil, ou s'il demande d'où vient une information. Tout ce que l'utilisateur te dit est enregistré automatiquement ; les faits durables le sont aussi via save_memory, en silence."
         } else if !recent.isEmpty {
             let lines = recent.map { m -> String in
                 let who = m.speaker == "user" ? "Utilisateur" : "Jarvis"
@@ -333,6 +350,12 @@ final class LiveVoiceClient: NSObject, ObservableObject {
             var result = "Fonction inconnue."
             if name == "recall_memory" {
                 result = await FirebaseSync.shared.recallText()
+            } else if name == "save_memory" {
+                let args = call["args"] as? [String: Any] ?? [:]
+                await FirebaseSync.shared.saveFact(category: args["category"] as? String ?? "notes",
+                                                   key: args["key"] as? String ?? "",
+                                                   value: args["value"] as? String ?? "")
+                result = "ok"
             }
             let payload: [String: Any] = [
                 "toolResponse": ["functionResponses": [["id": id, "name": name, "response": ["result": result]]]]
