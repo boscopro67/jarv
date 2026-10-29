@@ -340,6 +340,15 @@ private struct SettingsSheet: View {
                             .foregroundColor(Theme.dim.opacity(0.85))
                     }
 
+                    section("MÉMOIRE PARTAGÉE") {
+                        Text(client.syncDetail.isEmpty ? "Pas encore synchronisée." : client.syncDetail)
+                            .font(.system(size: 12))
+                            .foregroundColor(Theme.dim)
+                        Text("Chaque échange (PC et téléphone) est gardé sur ton serveur Firebase et relu au démarrage, même PC éteint.")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.dim.opacity(0.85))
+                    }
+
                     section("CLÉ GEMINI") {
                         Text(client.hasKey ? "Présente sur ce téléphone." : "Absente : lie le PC, ou colle-la ici.")
                             .font(.system(size: 12))

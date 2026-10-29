@@ -24,6 +24,10 @@ final class ChatStore: ObservableObject {
         var log = OfflineStore.load()
         log.append(StoredMessage(speaker: speaker, text: clean))
         OfflineStore.save(log)
+        // Mémoire partagée (PC + téléphone)
+        if speaker == "user" || speaker == "jarvis" {
+            Task { await FirebaseSync.shared.append(speaker: speaker, text: clean) }
+        }
     }
 
     /// Message écrit : JARVIS répond par écrit (Gemini direct).
@@ -42,7 +46,8 @@ final class ChatStore: ObservableObject {
             var reply: String?
             var failure: String?
             do {
-                reply = try await GeminiClient.reply(history: context, apiKey: key)
+                let memory = await FirebaseSync.shared.contextForPrompt()
+                reply = try await GeminiClient.reply(history: context, apiKey: key, memory: memory)
             } catch {
                 failure = error.localizedDescription
             }

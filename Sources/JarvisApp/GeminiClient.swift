@@ -110,23 +110,28 @@ enum GeminiClient {
     /// précédent n'existe plus côté Google).
     static let models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-flash-latest"]
 
-    private static func systemPrompt() -> String {
+    private static func systemPrompt(memory: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "fr_FR")
         formatter.dateStyle = .full
         formatter.timeStyle = .short
         let now = formatter.string(from: Date())
+        var memoryBlock = ""
+        if !memory.isEmpty {
+            memoryBlock = "Mémoire partagée entre le PC et le téléphone (tu t'en souviens, ne la récite pas) :\n" + memory
+        }
         return """
         Tu es JARVIS, l'assistant personnel de l'utilisateur, dans l'esprit de Jarvis d'Iron Man : professionnel, efficace, direct, légèrement ironique. Pas de blabla.
         Réponds dans la langue de l'utilisateur. Adapte la longueur à la demande : court par défaut, détaillé seulement si la question l'exige.
         Tu écris dans l'appli du téléphone de l'utilisateur. Tu ne peux exécuter aucune action sur son ordinateur (ouvrir une application, voir l'écran, accéder aux fichiers) : si on te le demande, dis-le en une phrase.
         Tu n'as pas accès à internet en direct : ne prétends jamais avoir vérifié une information récente, et signale quand une réponse peut être périmée.
         Date et heure actuelles : \(now).
+        \(memoryBlock)
         """
     }
 
     /// Envoie l'historique à Gemini et renvoie la réponse de JARVIS.
-    static func reply(history: [StoredMessage], apiKey: String) async throws -> String {
+    static func reply(history: [StoredMessage], apiKey: String, memory: String = "") async throws -> String {
         // Gemini veut des tours qui alternent, en commençant par l'utilisateur.
         var contents: [[String: Any]] = []
         for message in history {
@@ -152,7 +157,7 @@ enum GeminiClient {
         guard !contents.isEmpty else { throw GeminiError.empty }
 
         let body: [String: Any] = [
-            "system_instruction": ["parts": [["text": systemPrompt()]]],
+            "system_instruction": ["parts": [["text": systemPrompt(memory: memory)]]],
             "contents": contents,
             "generationConfig": ["temperature": 0.7]
         ]

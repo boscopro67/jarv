@@ -21,6 +21,7 @@ final class JarvisClient: ObservableObject {
     @Published var pcStatus: PCStatus = .notConfigured
     @Published var detail: String = ""
     @Published var hasKey: Bool = GeminiKeyStore.load() != nil
+    @Published var syncDetail: String = ""
 
     private var authToken: String?
     private var deviceToken: String? {
@@ -94,19 +95,50 @@ final class JarvisClient: ObservableObject {
 
     // ── Une vérification complète ───────────────────────────────────────
     private func checkOnce() async {
+        await FirebaseSync.shared.flush()
         guard !host.isEmpty else {
             pcStatus = .notConfigured
             detail = ""
+            syncDetail = await FirebaseSync.shared.status()
             return
         }
         if pcStatus != .online { pcStatus = .checking }
 
         // 1) Clé Gemini avec le jeton actuel
-        if let token = authToken, await fetchKey(token: token) { return }
+        if let token = authToken, await fetchKey(token: token) {
+            await afterCheck(token: token)
+            return
+        }
 
         // 2) Jeton absent ou périmé : on se reconnecte
-        guard let token = await login() else { return }
-        _ = await fetchKey(token: token)
+        if let token = await login() {
+            _ = await fetchKey(token: token)
+            await afterCheck(token: token)
+        } else {
+            syncDetail = await FirebaseSync.shared.status()
+        }
+    }
+
+    /// Une fois le PC joint : il autorise ce téléphone à lire/écrire la mémoire partagée.
+    private func afterCheck(token: String) async {
+        if pcStatus == .online, let uid = await FirebaseSync.shared.identity() {
+            let defaults = UserDefaults.standard
+            if defaults.string(forKey: "jarvis_fb_registered") != uid {
+                switch await call("/api/firebase-register", body: ["uid": uid], token: token) {
+                case .response(let status, _):
+                    if status == 200 {
+                        defaults.set(uid, forKey: "jarvis_fb_registered")
+                    } else {
+                        syncDetail = "Le PC n'a pas autorisé ce téléphone (code \(status)). Mets à jour le PC avec la nouvelle version."
+                        return
+                    }
+                case .unreachable:
+                    break
+                }
+            }
+            await FirebaseSync.shared.flush()
+        }
+        syncDetail = await FirebaseSync.shared.status()
     }
 
     /// Renvoie true si la liaison est bonne (jeton valide).

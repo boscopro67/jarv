@@ -140,8 +140,31 @@ final class LiveVoiceClient: NSObject, ObservableObject {
                     self.fail("Micro refusé. Réglages iPhone > JARVIS > Micro.")
                     return
                 }
-                self.open(key: key)
+                // On relit la mémoire partagée (5 s max) avant d'ouvrir la session.
+                Task {
+                    let shared = await Self.withTimeout(seconds: 5) {
+                        await FirebaseSync.shared.contextForPrompt()
+                    }
+                    DispatchQueue.main.async {
+                        guard self.state == .connecting else { return }
+                        self.open(key: key, sharedContext: shared ?? "")
+                    }
+                }
             }
+        }
+    }
+
+    private static func withTimeout<T: Sendable>(seconds: Double,
+                                                 _ operation: @escaping @Sendable () async -> T) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
@@ -169,7 +192,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
     }
 
     // ── Connexion ──────────────────────────────────────────────────────────
-    private func open(key: String) {
+    private func open(key: String, sharedContext: String) {
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
         let address = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(encodedKey)"
         guard let url = URL(string: address) else {
@@ -206,10 +229,10 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         }
 
         sock.open(url: url)
-        sock.sendText(setupMessage())
+        sock.sendText(setupMessage(sharedContext: sharedContext))
     }
 
-    private func setupMessage() -> String {
+    private func setupMessage(sharedContext: String) -> String {
         let setup: [String: Any] = [
             "setup": [
                 "model": "models/\(Self.model)",
@@ -219,7 +242,19 @@ final class LiveVoiceClient: NSObject, ObservableObject {
                         "voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.voiceName]]
                     ]
                 ],
-                "systemInstruction": ["parts": [["text": Self.systemPrompt()]]],
+                "systemInstruction": ["parts": [["text": Self.systemPrompt(sharedContext: sharedContext)]]],
+                "tools": [[
+                    "functionDeclarations": [[
+                        "name": "recall_memory",
+                        "description": "Relit l'historique le plus récent des conversations partagées entre le PC et le téléphone de l'utilisateur. À appeler dès que l'utilisateur parle de quelque chose dit plus tôt, hier, ou sur l'autre appareil (par exemple « le calcul que je t'ai demandé », « ce que je te disais tout à l'heure »).",
+                        "parameters": [
+                            "type": "OBJECT",
+                            "properties": [
+                                "reason": ["type": "STRING", "description": "Ce que tu cherches à retrouver"]
+                            ]
+                        ]
+                    ]]
+                ]],
                 "inputAudioTranscription": [String: Any](),
                 "outputAudioTranscription": [String: Any]()
             ]
@@ -229,7 +264,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         return text
     }
 
-    private static func systemPrompt() -> String {
+    private static func systemPrompt(sharedContext: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "fr_FR")
         formatter.dateStyle = .full
@@ -238,7 +273,10 @@ final class LiveVoiceClient: NSObject, ObservableObject {
 
         var memory = ""
         let recent = OfflineStore.load().suffix(12)
-        if !recent.isEmpty {
+        if !sharedContext.isEmpty {
+            memory = "\n\nMémoire partagée entre le PC et le téléphone de l'utilisateur (tu t'en souviens, ne la récite pas) :\n" + sharedContext
+                + "\nSi l'utilisateur parle de quelque chose qui n'est pas dans cette mémoire (dit à l'instant, ou sur l'autre appareil), appelle l'outil recall_memory pour relire l'historique le plus récent avant de répondre."
+        } else if !recent.isEmpty {
             let lines = recent.map { m -> String in
                 let who = m.speaker == "user" ? "Utilisateur" : "Jarvis"
                 return "- \(who) : \(String(m.text.prefix(300)))"
@@ -267,6 +305,11 @@ final class LiveVoiceClient: NSObject, ObservableObject {
             caption = "La session va se terminer…"
             captionIsUser = false
         }
+        if let toolCall = object["toolCall"] as? [String: Any],
+           let calls = toolCall["functionCalls"] as? [[String: Any]] {
+            for call in calls { answerTool(call) }
+            return
+        }
         guard let content = object["serverContent"] as? [String: Any] else { return }
 
         if (content["interrupted"] as? Bool) == true {
@@ -294,6 +337,24 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         }
         if (content["turnComplete"] as? Bool) == true {
             flushTranscripts()
+        }
+    }
+
+    private func answerTool(_ call: [String: Any]) {
+        guard let name = call["name"] as? String, let sock = socket else { return }
+        let id = call["id"] as? String ?? ""
+        Task {
+            var result = "Fonction inconnue."
+            if name == "recall_memory" {
+                result = await FirebaseSync.shared.recallText()
+            }
+            let payload: [String: Any] = [
+                "toolResponse": ["functionResponses": [["id": id, "name": name, "response": ["result": result]]]]
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let text = String(data: data, encoding: .utf8) {
+                sock.sendText(text)
+            }
         }
     }
 
