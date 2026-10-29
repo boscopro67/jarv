@@ -255,6 +255,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         ]
         let recallMemory: [String: Any] = [
             "name": "recall_memory",
+            "behavior": "BLOCKING",
             "description": "Relit l'historique le plus récent de toutes les conversations de l'utilisateur (PC et téléphone confondus). À appeler dès que l'utilisateur parle de quelque chose dit plus tôt, hier ou ailleurs (par exemple « le calcul que je t'ai demandé », « ce que je te disais tout à l'heure »).",
             "parameters": [
                 "type": "OBJECT",
