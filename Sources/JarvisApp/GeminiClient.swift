@@ -34,7 +34,7 @@ enum OfflineStore {
 }
 
 /// Clé Gemini : récupérée automatiquement depuis le PC (une fois connecté
-/// via Tailscale), puis gardée dans le Trousseau de l'iPhone.
+/// via le code d'appairage), puis gardée dans le Trousseau de l'iPhone.
 enum GeminiKeyStore {
     private static let service = "com.jarvis.remote.app.gemini"
     private static let account = "gemini_api_key"
@@ -99,7 +99,7 @@ enum GeminiError: LocalizedError {
         case .empty:
             return "Gemini n'a renvoyé aucune réponse."
         case .network(let detail):
-            return "Impossible de joindre Gemini (\(detail)). Vérifie la connexion du téléphone (essaie de couper Tailscale 5 secondes) puis réessaie."
+            return "Impossible de joindre Gemini (\(detail)). Vérifie la connexion internet du téléphone puis réessaie."
         }
     }
 }
@@ -201,7 +201,7 @@ enum GeminiClient {
     }
 
     /// Envoie la requête sur une connexion neuve à chaque essai (une connexion
-    /// réutilisée est souvent coupée quand le VPN Tailscale change de route) ;
+    /// réutilisée est souvent coupée quand le réseau change de route) ;
     /// réessaie 2 fois en cas de coupure passagère.
     private static func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         var attempt = 0

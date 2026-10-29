@@ -145,7 +145,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
     func start() {
         guard state == .idle else { return }
         guard let key = GeminiKeyStore.load() else {
-            errorText = "Clé Gemini absente. Ouvre les réglages : lie le PC une fois, ou colle la clé."
+            errorText = "Clé Gemini absente. Ouvre les réglages (pastille en haut à droite) et tape le code d'appairage du PC."
             return
         }
         errorText = nil

@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import Security
 
 // ══════════════════════════════════════════════════════════════════════
 //  MÉMOIRE PARTAGÉE — Firebase Realtime Database (REST, sans SDK).
@@ -12,6 +14,53 @@ enum FirebaseConfig {
     /// Clé web du projet (publique : elle sert seulement à créer l'identité anonyme).
     static let apiKey = "AIzaSyCS0GUSO9rUovaY4xsDtzL6Tz341cTWrQE"
     static let databaseURL = "https://jarvis-sync-b9371-default-rtdb.europe-west1.firebasedatabase.app"
+}
+
+/// Petit coffre dans le Trousseau de l'iPhone (identité Firebase du téléphone) :
+/// il survit souvent à une réinstallation de l'appli.
+enum Vault {
+    private static let service = "com.jarvis.remote.app.vault"
+
+    static func load(_ account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+           let data = item as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty {
+            return value
+        }
+        return UserDefaults.standard.string(forKey: "vault_fallback_\(account)")
+    }
+
+    static func save(_ value: String, _ account: String) {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(base as CFDictionary)
+        var add = base
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess {
+            UserDefaults.standard.removeObject(forKey: "vault_fallback_\(account)")
+        } else {
+            UserDefaults.standard.set(value, forKey: "vault_fallback_\(account)")
+        }
+    }
+}
+
+/// État de la liaison avec JARVIS (via Firebase).
+enum LinkState {
+    case linked       // autorisé : mémoire et clé Gemini disponibles
+    case notPaired    // pas encore lié : il faut taper le code d'appairage
+    case offline      // pas de réseau
+    case error        // Firebase a répondu autre chose
 }
 
 struct SharedMessage {
@@ -40,6 +89,10 @@ actor FirebaseSync {
     private let pendingKey = "jarvis_fb_pending"
 
     func status() -> String { lastStatus }
+
+    // Identité : Trousseau d'abord, anciens réglages en secours (migration).
+    private func storedRefresh() -> String? { Vault.load(refreshKey) ?? defaults.string(forKey: refreshKey) }
+    private func storedUID() -> String? { Vault.load(uidKey) ?? defaults.string(forKey: uidKey) }
 
     // ── HTTP ────────────────────────────────────────────────────────────
     private func send(_ url: URL, method: String, body: Data? = nil,
@@ -72,15 +125,15 @@ actor FirebaseSync {
     private func store(id: String, refresh: String, expires: String?, uid: String?) {
         idToken = id
         tokenExpiry = Date().addingTimeInterval(Double(expires ?? "3600") ?? 3600)
-        defaults.set(refresh, forKey: refreshKey)
-        if let uid = uid { defaults.set(uid, forKey: uidKey) }
+        Vault.save(refresh, refreshKey)
+        if let uid = uid { Vault.save(uid, uidKey) }
     }
 
     private func token(forceRefresh: Bool = false) async throws -> String {
         if !forceRefresh, let current = idToken, tokenExpiry > Date().addingTimeInterval(60) {
             return current
         }
-        if let refresh = defaults.string(forKey: refreshKey), let fresh = try await refreshToken(refresh) {
+        if let refresh = storedRefresh(), let fresh = try await refreshToken(refresh) {
             return fresh
         }
         return try await signUp()
@@ -127,7 +180,7 @@ actor FirebaseSync {
     func identity() async -> String? {
         do {
             _ = try await token()
-            return defaults.string(forKey: uidKey)
+            return storedUID()
         } catch FBError.auth(let text) {
             lastStatus = "Identité Firebase impossible : \(text). Vérifie que la connexion anonyme est activée et que la clé web est bonne."
             return nil
@@ -159,9 +212,105 @@ actor FirebaseSync {
 
     private func explain(status: Int, data: Data) {
         if status == 401 || status == 403 {
-            lastStatus = "En attente d'autorisation : ouvre l'appli avec le PC allumé (Tailscale) pour qu'il autorise ce téléphone."
+            lastStatus = "Pas encore lié : tape le code d'appairage affiché par le PC (Réglages)."
         } else {
             lastStatus = "Firebase a répondu \(status) : \(message(from: data))"
+        }
+    }
+
+    // ── Appairage par code (sans IP, sans VPN) ──────────────────────────
+    private func sha256Hex(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Clé Gemini que le PC dépose pour CE téléphone (secrets/<uid>/gemini).
+    func fetchGeminiKey() async -> Bool {
+        guard let uid = storedUID() else { return false }
+        do {
+            let (status, data) = try await database("secrets/\(uid)/gemini")
+            guard status == 200,
+                  let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+                  let key = object as? String, !key.isEmpty else { return false }
+            GeminiKeyStore.save(key)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Vérifie si ce téléphone est autorisé ; si oui, récupère la clé Gemini à jour.
+    func checkLink() async -> LinkState {
+        do {
+            _ = try await token()
+        } catch FBError.auth(let text) {
+            lastStatus = "Identité Firebase impossible : \(text)"
+            return .error
+        } catch {
+            lastStatus = "Hors ligne : tout est gardé et partira avec le réseau."
+            return .offline
+        }
+        do {
+            let query = [URLQueryItem(name: "orderBy", value: "\"$key\""),
+                         URLQueryItem(name: "limitToLast", value: "1")]
+            let (status, data) = try await database("memory/messages", query: query)
+            if status == 200 {
+                lastStatus = "Lié et synchronisé."
+                _ = await fetchGeminiKey()
+                return .linked
+            }
+            if status == 401 || status == 403 {
+                lastStatus = "Pas encore lié : tape le code d'appairage affiché par le PC (Réglages)."
+                return .notPaired
+            }
+            lastStatus = "Firebase a répondu \(status) : \(message(from: data))"
+            return .error
+        } catch {
+            lastStatus = "Hors ligne : tout est gardé et partira avec le réseau."
+            return .offline
+        }
+    }
+
+    /// Lie ce téléphone avec le code affiché par le PC. Renvoie nil si tout s'est bien passé,
+    /// sinon le message d'erreur à afficher.
+    func pair(code: String) async -> String? {
+        let normalized = String(code.uppercased().filter { $0.isLetter || $0.isNumber })
+        guard normalized.count == 8 else { return "Le code a 8 caractères (ex. ABCD-EFGH)." }
+        let hash = sha256Hex(normalized)
+        do {
+            _ = try await token()
+            guard let uid = storedUID() else { return "Identité du téléphone introuvable." }
+
+            // 1) Le code existe-t-il (et n'est-il pas expiré) ?
+            let (found, data) = try await database("pairing/\(hash)")
+            guard found == 200,
+                  let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+                  let node = object as? [String: Any] else {
+                return "Code inconnu ou expiré. Redemande un code au PC."
+            }
+            if let expires = node["expires"] as? Double, expires < Date().timeIntervalSince1970 * 1000 {
+                return "Ce code a expiré. Redemande un code au PC."
+            }
+
+            // 2) On le revendique avec l'identité de ce téléphone.
+            if (node["claim"] as? String) != uid {
+                let body = Data("\"\(uid)\"".utf8)
+                let (claimStatus, _) = try await database("pairing/\(hash)/claim", method: "PUT", body: body)
+                guard claimStatus == 200 else { return "Ce code a déjà été utilisé. Redemande un code au PC." }
+            }
+
+            // 3) Le PC nous autorise et dépose la clé Gemini : on attend (45 s max).
+            for _ in 0..<22 {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                if await fetchGeminiKey() {
+                    lastStatus = "Lié et synchronisé."
+                    return nil
+                }
+            }
+            return "Le PC n'a pas répondu. Vérifie que Jarvis est lancé sur le PC (avec internet) puis réessaie."
+        } catch FBError.auth(let text) {
+            return "Identité Firebase impossible : \(text)"
+        } catch {
+            return "Pas de réseau. Réessaie quand le téléphone est connecté à internet."
         }
     }
 

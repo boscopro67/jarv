@@ -97,10 +97,10 @@ struct ContentView: View {
 
     private var pcLabel: String {
         switch client.pcStatus {
-        case .online:        return "PC LIÉ"
-        case .checking:      return "PC…"
-        case .offline:       return "PC HORS LIGNE"
-        case .notConfigured: return "PC NON LIÉ"
+        case .online:        return "LIÉ"
+        case .checking:      return "…"
+        case .offline:       return "HORS LIGNE"
+        case .notConfigured: return "À LIER"
         }
     }
 
@@ -304,6 +304,7 @@ private struct SettingsSheet: View {
     @EnvironmentObject var voice: LiveVoiceClient
     @Environment(\.dismiss) private var dismiss
     @State private var manualKey = ""
+    @State private var pairCode = ""
 
     var body: some View {
         ZStack {
@@ -321,30 +322,32 @@ private struct SettingsSheet: View {
                             .foregroundColor(Theme.dim)
                     }
 
-                    section("ADRESSE DU PC (TAILSCALE)") {
-                        TextField("100.x.x.x", text: $client.remoteHost)
-                            .keyboardType(.numbersAndPunctuation)
-                            .autocapitalization(.none)
+                    section("LIER CE TÉLÉPHONE À JARVIS") {
+                        Text(client.pcStatus == .online
+                             ? "Lié. Rien d'autre à faire : l'appli reste connectée toute seule, partout."
+                             : "Demande « Jarvis, lie mon téléphone » sur le PC (ou lance pair_phone.py), puis tape ici le code affiché. Une seule fois.")
+                            .font(.system(size: 12))
+                            .foregroundColor(client.pcStatus == .online ? Theme.cyan : Theme.dim)
+                        TextField("ABCD-EFGH", text: $pairCode)
+                            .autocapitalization(.allCharacters)
                             .disableAutocorrection(true)
                             .field()
                         Button {
-                            client.recheckNow()
+                            client.pair(code: pairCode)
                         } label: {
-                            Text("VÉRIFIER LA LIAISON")
+                            Text(client.pairing ? "LIAISON…" : "LIER")
                                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                                 .frame(maxWidth: .infinity)
                                 .padding(12)
                                 .foregroundColor(Theme.cyan)
                                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.cyan.opacity(0.5)))
                         }
-                        if !client.detail.isEmpty {
-                            Text(client.detail)
+                        .disabled(client.pairing || pairCode.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if !client.pairMessage.isEmpty {
+                            Text(client.pairMessage)
                                 .font(.system(size: 12))
-                                .foregroundColor(Theme.dim)
+                                .foregroundColor(Theme.warn)
                         }
-                        Text("À saisir une seule fois. Le PC doit être allumé, Jarvis lancé, Tailscale actif sur le PC et sur le téléphone. Ensuite, le téléphone fonctionne aussi sans le PC.")
-                            .font(.system(size: 11))
-                            .foregroundColor(Theme.dim.opacity(0.85))
                     }
 
                     section("FILTRE ANTI-BRUIT DU MICRO") {
@@ -360,16 +363,16 @@ private struct SettingsSheet: View {
                     }
 
                     section("MÉMOIRE PARTAGÉE") {
-                        Text(client.syncDetail.isEmpty ? "Pas encore synchronisée." : client.syncDetail)
+                        Text(client.detail.isEmpty ? "Pas encore synchronisée." : client.detail)
                             .font(.system(size: 12))
                             .foregroundColor(Theme.dim)
-                        Text("Chaque échange (PC et téléphone) est gardé sur ton serveur Firebase et relu au démarrage, même PC éteint.")
+                        Text("Chaque échange (PC et téléphone) est gardé sur ton serveur Firebase et relu au démarrage, PC allumé ou non, sans VPN.")
                             .font(.system(size: 11))
                             .foregroundColor(Theme.dim.opacity(0.85))
                     }
 
                     section("CLÉ GEMINI") {
-                        Text(client.hasKey ? "Présente sur ce téléphone." : "Absente : lie le PC, ou colle-la ici.")
+                        Text(client.hasKey ? "Présente sur ce téléphone." : "Absente : lie le téléphone au PC, ou colle-la ici.")
                             .font(.system(size: 12))
                             .foregroundColor(client.hasKey ? Theme.cyan : Theme.warn)
                         SecureField("Coller une clé (facultatif)", text: $manualKey)
