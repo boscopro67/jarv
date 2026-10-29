@@ -269,7 +269,7 @@ private struct Bubble: View {
     var body: some View {
         HStack {
             if message.speaker == "user" { Spacer(minLength: 40) }
-            Text(message.text)
+            Text(rendered)
                 .font(.system(size: 15))
                 .foregroundColor(message.speaker == "sys" ? Theme.warn : .white)
                 .padding(10)
@@ -278,6 +278,12 @@ private struct Bubble: View {
                 .fixedSize(horizontal: false, vertical: true)
             if message.speaker != "user" { Spacer(minLength: 40) }
         }
+    }
+
+    /// Affiche le gras/italique au lieu des astérisques bruts.
+    private var rendered: AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: message.text, options: options)) ?? AttributedString(message.text)
     }
 
     private var background: Color {

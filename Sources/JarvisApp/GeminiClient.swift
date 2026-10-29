@@ -85,7 +85,7 @@ enum GeminiError: LocalizedError {
     case http(Int, String)
     case blocked
     case empty
-    case network
+    case network(String)
 
     var errorDescription: String? {
         switch self {
@@ -98,8 +98,8 @@ enum GeminiError: LocalizedError {
             return "Gemini a bloqué cette demande."
         case .empty:
             return "Gemini n'a renvoyé aucune réponse."
-        case .network:
-            return "Impossible de joindre Gemini : vérifie la connexion internet du téléphone."
+        case .network(let detail):
+            return "Impossible de joindre Gemini (\(detail)). Vérifie la connexion du téléphone (essaie de couper Tailscale 5 secondes) puis réessaie."
         }
     }
 }
@@ -123,6 +123,7 @@ enum GeminiClient {
         return """
         Tu es JARVIS, l'assistant personnel de l'utilisateur, dans l'esprit de Jarvis d'Iron Man : professionnel, efficace, direct, légèrement ironique. Pas de blabla.
         Réponds dans la langue de l'utilisateur. Adapte la longueur à la demande : court par défaut, détaillé seulement si la question l'exige.
+        N'utilise pas de mise en forme Markdown (pas d'astérisques ni de listes à puces) : du texte simple.
         Tu écris dans l'appli du téléphone de l'utilisateur. Tu ne peux exécuter aucune action sur son ordinateur (ouvrir une application, voir l'écran, accéder aux fichiers) : si on te le demande, dis-le en une phrase.
         Tu n'as pas accès à internet en direct : ne prétends jamais avoir vérifié une information récente, et signale quand une réponse peut être périmée.
         Date et heure actuelles : \(now).
@@ -174,8 +175,8 @@ enum GeminiClient {
             request.httpBody = payload
 
             do {
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else { throw GeminiError.network }
+                let (data, response) = try await fetch(request)
+                guard let http = response as? HTTPURLResponse else { throw GeminiError.network("réponse invalide") }
                 if http.statusCode == 404 {
                     lastError = GeminiError.http(404, "modèle introuvable")
                     continue
@@ -186,11 +187,41 @@ enum GeminiClient {
                 return try parseReply(data)
             } catch let error as GeminiError {
                 throw error
+            } catch let error as URLError {
+                throw GeminiError.network("\(error.code.rawValue) \(error.localizedDescription)")
             } catch {
-                throw GeminiError.network
+                throw GeminiError.network(error.localizedDescription)
             }
         }
         throw lastError
+    }
+
+    /// Session dédiée : attend le réseau au lieu d'échouer, et ne réutilise pas
+    /// de connexion périmée (fréquent quand le VPN Tailscale change de route).
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForResource = 90
+        return URLSession(configuration: config)
+    }()
+
+    /// Envoie la requête ; réessaie 2 fois en cas de coupure réseau passagère.
+    private static func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        var attempt = 0
+        while true {
+            do {
+                return try await session.data(for: request)
+            } catch let error as URLError {
+                let transient: [URLError.Code] = [.networkConnectionLost, .timedOut, .notConnectedToInternet,
+                                                  .cannotConnectToHost, .dnsLookupFailed, .cannotFindHost]
+                if attempt < 2, transient.contains(error.code) {
+                    attempt += 1
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    continue
+                }
+                throw error
+            }
+        }
     }
 
     private static func parseReply(_ data: Data) throws -> String {

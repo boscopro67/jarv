@@ -46,7 +46,7 @@ final class ChatStore: ObservableObject {
             var reply: String?
             var failure: String?
             do {
-                let memory = await FirebaseSync.shared.contextForPrompt()
+                let memory = await withTimeout(seconds: 4) { await FirebaseSync.shared.contextForPrompt() } ?? ""
                 reply = try await GeminiClient.reply(history: context, apiKey: key, memory: memory)
             } catch {
                 failure = error.localizedDescription
