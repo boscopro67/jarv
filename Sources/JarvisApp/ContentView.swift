@@ -39,7 +39,7 @@ struct ContentView: View {
             ChatSheet().environmentObject(chat).environmentObject(client)
         }
         .sheet(isPresented: $showSettings) {
-            SettingsSheet().environmentObject(client).environmentObject(chat)
+            SettingsSheet().environmentObject(client).environmentObject(chat).environmentObject(voice)
         }
         .onAppear {
             voice.onTranscript = { speaker, text in chat.record(speaker: speaker, text: text) }
@@ -301,6 +301,7 @@ private struct Bubble: View {
 private struct SettingsSheet: View {
     @EnvironmentObject var client: JarvisClient
     @EnvironmentObject var chat: ChatStore
+    @EnvironmentObject var voice: LiveVoiceClient
     @Environment(\.dismiss) private var dismiss
     @State private var manualKey = ""
 
@@ -342,6 +343,18 @@ private struct SettingsSheet: View {
                                 .foregroundColor(Theme.dim)
                         }
                         Text("À saisir une seule fois. Le PC doit être allumé, Jarvis lancé, Tailscale actif sur le PC et sur le téléphone. Ensuite, le téléphone fonctionne aussi sans le PC.")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.dim.opacity(0.85))
+                    }
+
+                    section("FILTRE ANTI-BRUIT DU MICRO") {
+                        Picker("Filtre", selection: $voice.noiseLevel) {
+                            Text("NORMAL").tag(0)
+                            Text("RENFORCÉ").tag(1)
+                            Text("MAX").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        Text("Renforcé ignore les petits bruits (doigt qui tape, frottements). Si Jarvis ne te capte plus bien, passe sur Normal ; s'il réagit encore aux bruits, passe sur Max.")
                             .font(.system(size: 11))
                             .foregroundColor(Theme.dim.opacity(0.85))
                     }

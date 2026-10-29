@@ -33,6 +33,18 @@ final class LiveAudioIO {
     private var generation = 0       // change à chaque interruption
     private var configObserver: NSObjectProtocol?
 
+    // ── Filtre anti-bruit (porte sonore) ────────────────────────────────
+    // Un tapotement ou un bruit bref ne doit pas passer pour de la parole :
+    // le micro n'est transmis à Gemini que lorsqu'un son SOUTENU dépasse le
+    // bruit ambiant. Le reste est remplacé par du silence.
+    var noiseMultiplier: Float = 1.7        // réglé dans les réglages (1 / 1.7 / 2.6)
+    var isAssistantSpeaking = false         // seuil relevé pendant que JARVIS parle
+    private var noiseFloor: Float = 0.006   // bruit ambiant appris en continu
+    private var aboveCount = 0
+    private var hangover = 0
+    private var gateOpen = false
+    private var previousChunk: Data?
+
     enum AudioError: LocalizedError {
         case noInput
         var errorDescription: String? { "Micro indisponible sur ce téléphone." }
@@ -58,18 +70,19 @@ final class LiveAudioIO {
         if player.engine == nil { engine.attach(player) }
         engine.connect(player, to: engine.mainMixerNode, format: playFormat)
 
+        gateOpen = false; aboveCount = 0; hangover = 0; previousChunk = nil
         let ratio = sendFormat.sampleRate / inputFormat.sampleRate
         input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
-            // Niveau sonore du micro (pour animer l'orbe)
+            // Niveau sonore brut du micro
+            var rms: Float = 0
             if let channel = buffer.floatChannelData?[0] {
                 let count = Int(buffer.frameLength)
                 if count > 0 {
                     var sum: Float = 0
                     for i in 0..<count { sum += channel[i] * channel[i] }
-                    let rms = (sum / Float(count)).squareRoot()
-                    self.onLevel?(min(1, rms * 7), false)
+                    rms = (sum / Float(count)).squareRoot()
                 }
             }
 
@@ -89,7 +102,34 @@ final class LiveAudioIO {
             let frames = Int(out.frameLength)
             guard frames > 0 else { return }
             let data = Data(bytes: channelData[0], count: frames * MemoryLayout<Int16>.size)
-            self.onMicChunk?(data)
+
+            // ── Porte sonore ──
+            var threshold = max(0.010, self.noiseFloor * 3.0) * self.noiseMultiplier
+            if self.isAssistantSpeaking { threshold *= 2.2 }   // écho / bruits pendant que JARVIS parle
+
+            if rms > threshold { self.aboveCount += 1 } else { self.aboveCount = 0 }
+
+            var preRoll: Data?
+            if !self.gateOpen && self.aboveCount >= 2 {      // son soutenu (≈ 90 ms), pas un simple choc
+                self.gateOpen = true
+                preRoll = self.previousChunk                  // on garde le début du mot
+            }
+            if self.gateOpen {
+                if rms > threshold * 0.6 {
+                    self.hangover = 10                        // reste ouverte ≈ 0,4 s après la parole
+                } else {
+                    self.hangover -= 1
+                    if self.hangover <= 0 { self.gateOpen = false }
+                }
+            } else if rms <= threshold {
+                // La porte est fermée : on apprend le bruit ambiant.
+                self.noiseFloor = min(0.03, self.noiseFloor * 0.97 + rms * 0.03)
+            }
+
+            self.onLevel?(self.gateOpen ? min(1, rms * 7) : 0, false)
+            if let pre = preRoll { self.onMicChunk?(pre) }
+            self.onMicChunk?(self.gateOpen ? data : Data(count: data.count))   // sinon : silence
+            self.previousChunk = data
         }
 
         engine.prepare()

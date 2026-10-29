@@ -99,7 +99,9 @@ final class LiveSocket: NSObject, URLSessionWebSocketDelegate, @unchecked Sendab
 
 final class LiveVoiceClient: NSObject, ObservableObject {
 
-    @Published var state: VoiceState = .idle
+    @Published var state: VoiceState = .idle {
+        didSet { audio.isAssistantSpeaking = (state == .speaking) }
+    }
     @Published var muted = false
     @Published var level: CGFloat = 0          // 0…1, anime l'orbe
     @Published var caption = ""                // dernière phrase (toi ou JARVIS)
@@ -118,6 +120,24 @@ final class LiveVoiceClient: NSObject, ObservableObject {
     private var userBuffer = ""
     private var jarvisBuffer = ""
     private var decayTimer: Timer?
+
+    /// Filtre anti-bruit : 0 = normal, 1 = renforcé, 2 = maximum.
+    @Published var noiseLevel: Int = (UserDefaults.standard.object(forKey: "jarvis_noise_level") as? Int) ?? 1 {
+        didSet {
+            UserDefaults.standard.set(noiseLevel, forKey: "jarvis_noise_level")
+            applyNoiseLevel()
+        }
+    }
+
+    override init() {
+        super.init()
+        applyNoiseLevel()
+    }
+
+    private func applyNoiseLevel() {
+        let table: [Float] = [1.0, 1.7, 2.6]
+        audio.noiseMultiplier = table[min(max(noiseLevel, 0), 2)]
+    }
 
     var isActive: Bool { state != .idle }
 
@@ -256,6 +276,16 @@ final class LiveVoiceClient: NSObject, ObservableObject {
                         "voiceConfig": ["prebuiltVoiceConfig": ["voiceName": Self.voiceName]]
                     ]
                 ],
+                // Détection de parole côté Gemini : moins sensible aux bruits brefs,
+                // et attend un peu plus de silence avant de conclure que tu as fini.
+                "realtimeInputConfig": [
+                    "automaticActivityDetection": [
+                        "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                        "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                        "prefixPaddingMs": 150,
+                        "silenceDurationMs": 700
+                    ] as [String: Any]
+                ] as [String: Any],
                 "systemInstruction": ["parts": [["text": Self.systemPrompt(sharedContext: sharedContext)]]],
                 "tools": [["functionDeclarations": Self.toolDeclarations()]],
                 "inputAudioTranscription": [String: Any](),
@@ -291,6 +321,7 @@ final class LiveVoiceClient: NSObject, ObservableObject {
         Tu es JARVIS, l'assistant personnel de l'utilisateur, dans l'esprit de Jarvis d'Iron Man : professionnel, efficace, direct, légèrement ironique. Pas de blabla.
         Tu parles à voix haute depuis le téléphone de l'utilisateur : phrases courtes et naturelles, sans listes ni symboles, détaillé seulement si la question l'exige.
         Réponds dans la langue de l'utilisateur (français par défaut).
+        Ignore les bruits parasites et tout ce qui n'est pas clairement de la parole adressée à toi ; si tu n'as pas compris, ne réponds pas.
         Tu ne peux pas agir sur l'ordinateur et tu n'as pas accès à internet en direct : ne prétends jamais avoir vérifié une information récente, et signale quand une réponse peut être périmée.
         Date et heure actuelles : \(now).\(memory)
         """
